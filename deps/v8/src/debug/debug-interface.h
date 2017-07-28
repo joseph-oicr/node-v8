@@ -5,8 +5,6 @@
 #ifndef V8_DEBUG_DEBUG_INTERFACE_H_
 #define V8_DEBUG_DEBUG_INTERFACE_H_
 
-#include <functional>
-
 #include "include/v8-debug.h"
 #include "include/v8-util.h"
 #include "include/v8.h"
@@ -17,6 +15,7 @@
 namespace v8 {
 
 namespace internal {
+struct CoverageBlock;
 struct CoverageFunction;
 struct CoverageScript;
 class Coverage;
@@ -24,6 +23,9 @@ class Script;
 }
 
 namespace debug {
+
+void SetContextId(Local<Context> context, int id);
+int GetContextId(Local<Context> context);
 
 /**
  * Debugger is running in its own context which is entered while debugger
@@ -126,6 +128,7 @@ class V8_EXPORT_PRIVATE Script {
 
   ScriptOriginOptions OriginOptions() const;
   bool WasCompiled() const;
+  bool IsEmbedded() const;
   int Id() const;
   int LineOffset() const;
   int ColumnOffset() const;
@@ -133,7 +136,7 @@ class V8_EXPORT_PRIVATE Script {
   MaybeLocal<String> Name() const;
   MaybeLocal<String> SourceURL() const;
   MaybeLocal<String> SourceMappingURL() const;
-  MaybeLocal<Value> ContextData() const;
+  Maybe<int> ContextId() const;
   MaybeLocal<String> Source() const;
   bool IsWasm() const;
   bool IsModule() const;
@@ -166,8 +169,7 @@ MaybeLocal<UnboundScript> CompileInspectorScript(Isolate* isolate,
 class DebugDelegate {
  public:
   virtual ~DebugDelegate() {}
-  virtual void PromiseEventOccurred(v8::Local<v8::Context> context,
-                                    debug::PromiseDebugActionType type, int id,
+  virtual void PromiseEventOccurred(debug::PromiseDebugActionType type, int id,
                                     int parent_id, bool created_by_user) {}
   virtual void ScriptCompiled(v8::Local<Script> script,
                               bool has_compile_error) {}
@@ -207,6 +209,14 @@ enum Builtin {
 
 Local<Function> GetBuiltin(Isolate* isolate, Builtin builtin);
 
+V8_EXPORT_PRIVATE void SetConsoleDelegate(Isolate* isolate,
+                                          ConsoleDelegate* delegate);
+
+int GetStackFrameId(v8::Local<v8::StackFrame> frame);
+
+v8::Local<v8::StackTrace> GetDetailedStackTrace(Isolate* isolate,
+                                                v8::Local<v8::Object> error);
+
 /**
  * Native wrapper around v8::internal::JSGeneratorObject object.
  */
@@ -237,10 +247,29 @@ class V8_EXPORT_PRIVATE Coverage {
     // We are only interested in a yes/no result for the function. Optimization
     // and GC can be allowed once a function has been invoked. Collecting
     // precise binary coverage resets counters for incremental updates.
-    kPreciseBinary
+    kPreciseBinary,
+    // Similar to the precise coverage modes but provides coverage at a
+    // lower granularity. Design doc: goo.gl/lA2swZ.
+    kBlockCount,
+    kBlockBinary,
   };
 
-  class ScriptData;  // Forward declaration.
+  // Forward declarations.
+  class ScriptData;
+  class FunctionData;
+
+  class V8_EXPORT_PRIVATE BlockData {
+   public:
+    int StartOffset() const;
+    int EndOffset() const;
+    uint32_t Count() const;
+
+   private:
+    explicit BlockData(i::CoverageBlock* block) : block_(block) {}
+    i::CoverageBlock* block_;
+
+    friend class v8::debug::Coverage::FunctionData;
+  };
 
   class V8_EXPORT_PRIVATE FunctionData {
    public:
@@ -248,6 +277,9 @@ class V8_EXPORT_PRIVATE Coverage {
     int EndOffset() const;
     uint32_t Count() const;
     MaybeLocal<String> Name() const;
+    size_t BlockCount() const;
+    bool HasBlockCoverage() const;
+    BlockData GetBlockData(size_t i) const;
 
    private:
     explicit FunctionData(i::CoverageFunction* function)
@@ -285,6 +317,71 @@ class V8_EXPORT_PRIVATE Coverage {
   explicit Coverage(i::Coverage* coverage) : coverage_(coverage) {}
   i::Coverage* coverage_;
 };
+
+class ScopeIterator {
+ public:
+  static std::unique_ptr<ScopeIterator> CreateForFunction(
+      v8::Isolate* isolate, v8::Local<v8::Function> func);
+  static std::unique_ptr<ScopeIterator> CreateForGeneratorObject(
+      v8::Isolate* isolate, v8::Local<v8::Object> generator);
+
+  ScopeIterator() = default;
+  virtual ~ScopeIterator() = default;
+
+  enum ScopeType {
+    ScopeTypeGlobal = 0,
+    ScopeTypeLocal,
+    ScopeTypeWith,
+    ScopeTypeClosure,
+    ScopeTypeCatch,
+    ScopeTypeBlock,
+    ScopeTypeScript,
+    ScopeTypeEval,
+    ScopeTypeModule
+  };
+
+  virtual bool Done() = 0;
+  virtual void Advance() = 0;
+  virtual ScopeType GetType() = 0;
+  virtual v8::Local<v8::Object> GetObject() = 0;
+  virtual v8::Local<v8::Function> GetFunction() = 0;
+  virtual debug::Location GetStartLocation() = 0;
+  virtual debug::Location GetEndLocation() = 0;
+
+  virtual bool SetVariableValue(v8::Local<v8::String> name,
+                                v8::Local<v8::Value> value) = 0;
+
+ private:
+  DISALLOW_COPY_AND_ASSIGN(ScopeIterator);
+};
+
+class StackTraceIterator {
+ public:
+  static std::unique_ptr<StackTraceIterator> Create(Isolate* isolate,
+                                                    int index = 0);
+  StackTraceIterator() = default;
+  virtual ~StackTraceIterator() = default;
+
+  virtual bool Done() const = 0;
+  virtual void Advance() = 0;
+
+  virtual int GetContextId() const = 0;
+  virtual v8::Local<v8::Value> GetReceiver() const = 0;
+  virtual v8::Local<v8::Value> GetReturnValue() const = 0;
+  virtual v8::Local<v8::String> GetFunctionName() const = 0;
+  virtual v8::Local<v8::debug::Script> GetScript() const = 0;
+  virtual debug::Location GetSourceLocation() const = 0;
+  virtual v8::Local<v8::Function> GetFunction() const = 0;
+  virtual std::unique_ptr<ScopeIterator> GetScopeIterator() const = 0;
+
+  virtual bool Restart() = 0;
+  virtual v8::MaybeLocal<v8::Value> Evaluate(v8::Local<v8::String> source,
+                                             bool throw_on_side_effect) = 0;
+
+ private:
+  DISALLOW_COPY_AND_ASSIGN(StackTraceIterator);
+};
+
 }  // namespace debug
 }  // namespace v8
 

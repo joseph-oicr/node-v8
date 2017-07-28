@@ -70,21 +70,17 @@ TEST(VectorStructure) {
 
     int index = vector->GetIndex(helper.slot(0));
 
-    CHECK_EQ(FeedbackVector::kReservedIndexCount, index);
     CHECK_EQ(helper.slot(0), vector->ToSlot(index));
 
     index = vector->GetIndex(helper.slot(3));
-    CHECK_EQ(FeedbackVector::kReservedIndexCount + 3, index);
     CHECK_EQ(helper.slot(3), vector->ToSlot(index));
 
     index = vector->GetIndex(helper.slot(7));
-    CHECK_EQ(FeedbackVector::kReservedIndexCount + 3 +
-                 4 * FeedbackMetadata::GetSlotSize(FeedbackSlotKind::kCall),
+    CHECK_EQ(3 + 4 * FeedbackMetadata::GetSlotSize(FeedbackSlotKind::kCall),
              index);
     CHECK_EQ(helper.slot(7), vector->ToSlot(index));
 
-    CHECK_EQ(FeedbackVector::kReservedIndexCount + 3 +
-                 5 * FeedbackMetadata::GetSlotSize(FeedbackSlotKind::kCall),
+    CHECK_EQ(3 + 5 * FeedbackMetadata::GetSlotSize(FeedbackSlotKind::kCall),
              vector->length());
   }
 
@@ -220,7 +216,7 @@ TEST(VectorCallICStates) {
   CHECK_EQ(GENERIC, nexus.StateFromFeedback());
 
   // After a collection, state should remain GENERIC.
-  CcTest::CollectAllGarbage(i::Heap::kFinalizeIncrementalMarkingMask);
+  CcTest::CollectAllGarbage();
   CHECK_EQ(GENERIC, nexus.StateFromFeedback());
 }
 
@@ -245,7 +241,7 @@ TEST(VectorCallFeedbackForArray) {
   CHECK_EQ(MONOMORPHIC, nexus.StateFromFeedback());
   CHECK(nexus.GetFeedback()->IsAllocationSite());
 
-  CcTest::CollectAllGarbage(i::Heap::kFinalizeIncrementalMarkingMask);
+  CcTest::CollectAllGarbage();
   // It should stay monomorphic even after a GC.
   CHECK_EQ(MONOMORPHIC, nexus.StateFromFeedback());
 }
@@ -349,9 +345,9 @@ TEST(VectorLoadICStates) {
 
   CompileRun("f({ blarg: 3, torino: 10, foo: 2 })");
   CHECK_EQ(POLYMORPHIC, nexus.StateFromFeedback());
-  MapHandleList maps;
-  nexus.FindAllMaps(&maps);
-  CHECK_EQ(4, maps.length());
+  MapHandles maps;
+  nexus.ExtractMaps(&maps);
+  CHECK_EQ(4, maps.size());
 
   // Finally driven megamorphic.
   CompileRun("f({ blarg: 3, gran: 3, torino: 10, foo: 2 })");
@@ -359,7 +355,7 @@ TEST(VectorLoadICStates) {
   CHECK(!nexus.FindFirstMap());
 
   // After a collection, state should not be reset to PREMONOMORPHIC.
-  CcTest::CollectAllGarbage(i::Heap::kFinalizeIncrementalMarkingMask);
+  CcTest::CollectAllGarbage();
   CHECK_EQ(MEGAMORPHIC, nexus.StateFromFeedback());
 }
 
@@ -428,9 +424,9 @@ TEST(VectorLoadICOnSmi) {
   CompileRun("f(o)");
   CHECK_EQ(POLYMORPHIC, nexus.StateFromFeedback());
 
-  MapHandleList maps;
-  nexus.FindAllMaps(&maps);
-  CHECK_EQ(2, maps.length());
+  MapHandles maps;
+  nexus.ExtractMaps(&maps);
+  CHECK_EQ(2, maps.size());
 
   // One of the maps should be the o map.
   v8::MaybeLocal<v8::Value> v8_o =
@@ -439,8 +435,7 @@ TEST(VectorLoadICOnSmi) {
       Handle<JSObject>::cast(v8::Utils::OpenHandle(*v8_o.ToLocalChecked()));
   bool number_map_found = false;
   bool o_map_found = false;
-  for (int i = 0; i < maps.length(); i++) {
-    Handle<Map> current = maps[i];
+  for (Handle<Map> current : maps) {
     if (*current == number_map)
       number_map_found = true;
     else if (*current == o->map())
@@ -451,9 +446,9 @@ TEST(VectorLoadICOnSmi) {
   // The degree of polymorphism doesn't change.
   CompileRun("f(100)");
   CHECK_EQ(POLYMORPHIC, nexus.StateFromFeedback());
-  MapHandleList maps2;
-  nexus.FindAllMaps(&maps2);
-  CHECK_EQ(2, maps2.length());
+  MapHandles maps2;
+  nexus.ExtractMaps(&maps2);
+  CHECK_EQ(2, maps2.size());
 }
 
 

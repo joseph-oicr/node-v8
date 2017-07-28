@@ -100,12 +100,12 @@ struct BlockTypeOperand {
       types = pc + 1;
     } else {
       // Handle multi-value blocks.
-      if (!CHECKED_COND(FLAG_wasm_mv_prototype)) {
-        decoder->error(pc + 1, "invalid block arity > 1");
+      if (!CHECKED_COND(FLAG_experimental_wasm_mv)) {
+        decoder->error(pc + 1) << "invalid block arity > 1";
         return;
       }
       if (!CHECKED_COND(val == kMultivalBlock)) {
-        decoder->error(pc + 1, "invalid block type");
+        decoder->error(pc + 1) << "invalid block type";
         return;
       }
       // Decode and check the types vector of the block.
@@ -123,7 +123,7 @@ struct BlockTypeOperand {
         val = decoder->read_u8<checked>(pc + offset, "block type");
         decode_local_type(val, &type);
         if (!CHECKED_COND(type != kWasmStmt)) {
-          decoder->error(pc + offset, "invalid block type");
+          decoder->error(pc + offset) << "invalid block type";
           return;
         }
       }
@@ -151,15 +151,6 @@ struct BlockTypeOperand {
         return true;
       case kLocalS128:
         *result = kWasmS128;
-        return true;
-      case kLocalS1x4:
-        *result = kWasmS1x4;
-        return true;
-      case kLocalS1x8:
-        *result = kWasmS1x8;
-        return true;
-      case kLocalS1x16:
-        *result = kWasmS1x16;
         return true;
       default:
         *result = kWasmStmt;
@@ -196,8 +187,8 @@ struct CallIndirectOperand {
     index = decoder->read_u32v<checked>(pc + 1, &len, "signature index");
     table_index = decoder->read_u8<checked>(pc + 1 + len, "table index");
     if (!CHECKED_COND(table_index == 0)) {
-      decoder->errorf(pc + 1 + len, "expected table index 0, found %u",
-                      table_index);
+      decoder->error(pc + 1 + len)
+          << "expected table index 0, found " << table_index;
     }
     length = 1 + len;
   }
@@ -220,7 +211,7 @@ struct MemoryIndexOperand {
   inline MemoryIndexOperand(Decoder* decoder, const byte* pc) {
     index = decoder->read_u8<checked>(pc + 1, "memory index");
     if (!CHECKED_COND(index == 0)) {
-      decoder->errorf(pc + 1, "expected memory index 0, found %u", index);
+      decoder->error(pc + 1) << "expected memory index 0, found " << index;
     }
   }
 };
@@ -288,10 +279,9 @@ struct MemoryAccessOperand {
     alignment =
         decoder->read_u32v<checked>(pc + 1, &alignment_length, "alignment");
     if (!CHECKED_COND(alignment <= max_alignment)) {
-      decoder->errorf(pc + 1,
-                      "invalid alignment; expected maximum alignment is %u, "
-                      "actual alignment is %u",
-                      max_alignment, alignment);
+      decoder->error(pc + 1)
+          << "invalid alignment; expected maximum alignment is "
+          << max_alignment << ", actual alignment is " << alignment;
     }
     unsigned offset_length;
     offset = decoder->read_u32v<checked>(pc + 1 + alignment_length,
@@ -319,6 +309,18 @@ struct SimdShiftOperand {
 
   inline SimdShiftOperand(Decoder* decoder, const byte* pc) {
     shift = decoder->read_u8<checked>(pc + 2, "shift");
+  }
+};
+
+// Operand for SIMD S8x16 shuffle operations.
+template <bool checked>
+struct Simd8x16ShuffleOperand {
+  uint8_t shuffle[kSimd128Size];
+
+  inline Simd8x16ShuffleOperand(Decoder* decoder, const byte* pc) {
+    for (uint32_t i = 0; i < kSimd128Size; ++i) {
+      shuffle[i] = decoder->read_u8<checked>(pc + 2 + i, "shuffle");
+    }
   }
 };
 

@@ -20,40 +20,40 @@ import v8_commands
 import v8_suppressions
 
 CONFIGS = dict(
-  default=[],
-  fullcode=[
-    '--nocrankshaft',
-    '--turbo-filter=~',
+  default=[
+    '--suppress-asm-messages',
   ],
   ignition=[
-    '--ignition',
     '--turbo-filter=~',
-    '--hydrogen-filter=~',
-    '--nocrankshaft',
+    '--noopt',
+    '--suppress-asm-messages',
+  ],
+  ignition_asm=[
+    '--turbo-filter=~',
+    '--noopt',
+    '--validate-asm',
+    '--stress-validate-asm',
+    '--suppress-asm-messages',
   ],
   ignition_eager=[
-    '--ignition',
     '--turbo-filter=~',
-    '--hydrogen-filter=~',
-    '--nocrankshaft',
+    '--noopt',
     '--no-lazy',
     '--no-lazy-inner-functions',
+    '--suppress-asm-messages',
   ],
   ignition_turbo=[
-    '--ignition',
-    '--turbo',
+    '--suppress-asm-messages',
   ],
   ignition_turbo_opt=[
-    '--ignition',
-    '--turbo',
     '--always-opt',
+    '--suppress-asm-messages',
   ],
   ignition_turbo_opt_eager=[
-    '--ignition',
-    '--turbo',
     '--always-opt',
     '--no-lazy',
     '--no-lazy-inner-functions',
+    '--suppress-asm-messages',
   ],
 )
 

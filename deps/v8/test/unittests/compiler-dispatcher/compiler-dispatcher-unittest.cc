@@ -8,6 +8,7 @@
 
 #include "include/v8-platform.h"
 #include "src/api.h"
+#include "src/ast/ast-value-factory.h"
 #include "src/base/platform/semaphore.h"
 #include "src/compiler-dispatcher/compiler-dispatcher-job.h"
 #include "src/compiler-dispatcher/compiler-dispatcher-tracer.h"
@@ -18,7 +19,7 @@
 #include "src/parsing/parse-info.h"
 #include "src/parsing/parsing.h"
 #include "src/v8.h"
-#include "test/unittests/compiler-dispatcher/compiler-dispatcher-helper.h"
+#include "test/unittests/test-helpers.h"
 #include "test/unittests/test-utils.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -42,7 +43,7 @@ class CompilerDispatcherTestFlags {
     CHECK_NULL(save_flags_);
     save_flags_ = new SaveFlags();
     FLAG_single_threaded = true;
-    FLAG_ignition = true;
+    FLAG_stress_fullcodegen = false;
     FlagList::EnforceFlagImplications();
     FLAG_compiler_dispatcher = true;
   }
@@ -76,6 +77,17 @@ class CompilerDispatcherTest : public TestWithContext {
     CompilerDispatcherTestFlags::RestoreFlags();
   }
 
+  static UnoptimizedCompileJob::Status GetUnoptimizedJobStatus(
+      const CompilerDispatcherJob* job) {
+    CHECK_EQ(CompilerDispatcherJob::kUnoptimizedCompile, job->type());
+    return job->AsUnoptimizedCompileJob()->status();
+  }
+
+  static UnoptimizedCompileJob::Status GetUnoptimizedJobStatus(
+      const std::unique_ptr<CompilerDispatcherJob>& job) {
+    return GetUnoptimizedJobStatus(job.get());
+  }
+
  private:
   DISALLOW_COPY_AND_ASSIGN(CompilerDispatcherTest);
 };
@@ -103,7 +115,12 @@ namespace {
 
 class MockPlatform : public v8::Platform {
  public:
-  MockPlatform() : time_(0.0), time_step_(0.0), idle_task_(nullptr), sem_(0) {}
+  explicit MockPlatform(v8::TracingController* tracing_controller)
+      : time_(0.0),
+        time_step_(0.0),
+        idle_task_(nullptr),
+        sem_(0),
+        tracing_controller_(tracing_controller) {}
   ~MockPlatform() override {
     base::LockGuard<base::Mutex> lock(&mutex_);
     EXPECT_TRUE(foreground_tasks_.empty());
@@ -141,6 +158,10 @@ class MockPlatform : public v8::Platform {
   double MonotonicallyIncreasingTime() override {
     time_ += time_step_;
     return time_;
+  }
+
+  v8::TracingController* GetTracingController() override {
+    return tracing_controller_;
   }
 
   void RunIdleTask(double deadline_in_seconds, double time_step) {
@@ -269,6 +290,8 @@ class MockPlatform : public v8::Platform {
 
   base::Semaphore sem_;
 
+  v8::TracingController* tracing_controller_;
+
   DISALLOW_COPY_AND_ASSIGN(MockPlatform);
 };
 
@@ -277,12 +300,12 @@ const char test_script[] = "(x) { x*x; }";
 }  // namespace
 
 TEST_F(CompilerDispatcherTest, Construct) {
-  MockPlatform platform;
+  MockPlatform platform(V8::GetCurrentPlatform()->GetTracingController());
   CompilerDispatcher dispatcher(i_isolate(), &platform, FLAG_stack_size);
 }
 
 TEST_F(CompilerDispatcherTest, IsEnqueued) {
-  MockPlatform platform;
+  MockPlatform platform(V8::GetCurrentPlatform()->GetTracingController());
   CompilerDispatcher dispatcher(i_isolate(), &platform, FLAG_stack_size);
 
   const char script[] = TEST_SCRIPT();
@@ -300,7 +323,7 @@ TEST_F(CompilerDispatcherTest, IsEnqueued) {
 }
 
 TEST_F(CompilerDispatcherTest, FinishNow) {
-  MockPlatform platform;
+  MockPlatform platform(V8::GetCurrentPlatform()->GetTracingController());
   CompilerDispatcher dispatcher(i_isolate(), &platform, FLAG_stack_size);
 
   const char script[] = TEST_SCRIPT();
@@ -319,7 +342,7 @@ TEST_F(CompilerDispatcherTest, FinishNow) {
 }
 
 TEST_F(CompilerDispatcherTest, FinishAllNow) {
-  MockPlatform platform;
+  MockPlatform platform(V8::GetCurrentPlatform()->GetTracingController());
   CompilerDispatcher dispatcher(i_isolate(), &platform, FLAG_stack_size);
 
   constexpr int num_funcs = 2;
@@ -349,7 +372,7 @@ TEST_F(CompilerDispatcherTest, FinishAllNow) {
 }
 
 TEST_F(CompilerDispatcherTest, IdleTask) {
-  MockPlatform platform;
+  MockPlatform platform(V8::GetCurrentPlatform()->GetTracingController());
   CompilerDispatcher dispatcher(i_isolate(), &platform, FLAG_stack_size);
 
   const char script[] = TEST_SCRIPT();
@@ -370,7 +393,7 @@ TEST_F(CompilerDispatcherTest, IdleTask) {
 }
 
 TEST_F(CompilerDispatcherTest, IdleTaskSmallIdleTime) {
-  MockPlatform platform;
+  MockPlatform platform(V8::GetCurrentPlatform()->GetTracingController());
   CompilerDispatcher dispatcher(i_isolate(), &platform, FLAG_stack_size);
 
   const char script[] = TEST_SCRIPT();
@@ -384,8 +407,8 @@ TEST_F(CompilerDispatcherTest, IdleTaskSmallIdleTime) {
 
   // The job should be scheduled for the main thread.
   ASSERT_EQ(dispatcher.jobs_.size(), 1u);
-  ASSERT_TRUE(dispatcher.jobs_.begin()->second->status() ==
-              CompileJobStatus::kInitial);
+  ASSERT_EQ(UnoptimizedCompileJob::Status::kInitial,
+            GetUnoptimizedJobStatus(dispatcher.jobs_.begin()->second));
 
   // Only grant a little idle time and have time advance beyond it in one step.
   platform.RunIdleTask(2.0, 1.0);
@@ -397,8 +420,8 @@ TEST_F(CompilerDispatcherTest, IdleTaskSmallIdleTime) {
   // The job should be still scheduled for the main thread, but ready for
   // parsing.
   ASSERT_EQ(dispatcher.jobs_.size(), 1u);
-  ASSERT_TRUE(dispatcher.jobs_.begin()->second->status() ==
-              CompileJobStatus::kReadyToParse);
+  ASSERT_EQ(UnoptimizedCompileJob::Status::kReadyToParse,
+            GetUnoptimizedJobStatus(dispatcher.jobs_.begin()->second));
 
   // Now grant a lot of idle time and freeze time.
   platform.RunIdleTask(1000.0, 0.0);
@@ -409,7 +432,7 @@ TEST_F(CompilerDispatcherTest, IdleTaskSmallIdleTime) {
 }
 
 TEST_F(CompilerDispatcherTest, IdleTaskException) {
-  MockPlatform platform;
+  MockPlatform platform(V8::GetCurrentPlatform()->GetTracingController());
   CompilerDispatcher dispatcher(i_isolate(), &platform, 50);
 
   std::string func_name("f" STR(__LINE__));
@@ -436,7 +459,7 @@ TEST_F(CompilerDispatcherTest, IdleTaskException) {
 }
 
 TEST_F(CompilerDispatcherTest, CompileOnBackgroundThread) {
-  MockPlatform platform;
+  MockPlatform platform(V8::GetCurrentPlatform()->GetTracingController());
   CompilerDispatcher dispatcher(i_isolate(), &platform, FLAG_stack_size);
 
   const char script[] = TEST_SCRIPT();
@@ -449,15 +472,15 @@ TEST_F(CompilerDispatcherTest, CompileOnBackgroundThread) {
   ASSERT_TRUE(platform.IdleTaskPending());
 
   ASSERT_EQ(dispatcher.jobs_.size(), 1u);
-  ASSERT_TRUE(dispatcher.jobs_.begin()->second->status() ==
-              CompileJobStatus::kInitial);
+  ASSERT_EQ(UnoptimizedCompileJob::Status::kInitial,
+            GetUnoptimizedJobStatus(dispatcher.jobs_.begin()->second));
 
   // Make compiling super expensive, and advance job as much as possible on the
   // foreground thread.
-  dispatcher.tracer_->RecordCompile(50000.0, 1);
+  dispatcher.tracer_->RecordCompile(50000.0);
   platform.RunIdleTask(10.0, 0.0);
-  ASSERT_TRUE(dispatcher.jobs_.begin()->second->status() ==
-              CompileJobStatus::kReadyToCompile);
+  ASSERT_EQ(UnoptimizedCompileJob::Status::kReadyToCompile,
+            GetUnoptimizedJobStatus(dispatcher.jobs_.begin()->second));
 
   ASSERT_TRUE(dispatcher.IsEnqueued(shared));
   ASSERT_FALSE(shared->is_compiled());
@@ -468,8 +491,8 @@ TEST_F(CompilerDispatcherTest, CompileOnBackgroundThread) {
 
   ASSERT_TRUE(platform.IdleTaskPending());
   ASSERT_FALSE(platform.BackgroundTasksPending());
-  ASSERT_TRUE(dispatcher.jobs_.begin()->second->status() ==
-              CompileJobStatus::kCompiled);
+  ASSERT_EQ(UnoptimizedCompileJob::Status::kCompiled,
+            GetUnoptimizedJobStatus(dispatcher.jobs_.begin()->second));
 
   // Now grant a lot of idle time and freeze time.
   platform.RunIdleTask(1000.0, 0.0);
@@ -480,7 +503,7 @@ TEST_F(CompilerDispatcherTest, CompileOnBackgroundThread) {
 }
 
 TEST_F(CompilerDispatcherTest, FinishNowWithBackgroundTask) {
-  MockPlatform platform;
+  MockPlatform platform(V8::GetCurrentPlatform()->GetTracingController());
   CompilerDispatcher dispatcher(i_isolate(), &platform, FLAG_stack_size);
 
   const char script[] = TEST_SCRIPT();
@@ -493,15 +516,15 @@ TEST_F(CompilerDispatcherTest, FinishNowWithBackgroundTask) {
   ASSERT_TRUE(platform.IdleTaskPending());
 
   ASSERT_EQ(dispatcher.jobs_.size(), 1u);
-  ASSERT_TRUE(dispatcher.jobs_.begin()->second->status() ==
-              CompileJobStatus::kInitial);
+  ASSERT_EQ(UnoptimizedCompileJob::Status::kInitial,
+            GetUnoptimizedJobStatus(dispatcher.jobs_.begin()->second));
 
   // Make compiling super expensive, and advance job as much as possible on the
   // foreground thread.
-  dispatcher.tracer_->RecordCompile(50000.0, 1);
+  dispatcher.tracer_->RecordCompile(50000.0);
   platform.RunIdleTask(10.0, 0.0);
-  ASSERT_TRUE(dispatcher.jobs_.begin()->second->status() ==
-              CompileJobStatus::kReadyToCompile);
+  ASSERT_EQ(UnoptimizedCompileJob::Status::kReadyToCompile,
+            GetUnoptimizedJobStatus(dispatcher.jobs_.begin()->second));
 
   ASSERT_TRUE(dispatcher.IsEnqueued(shared));
   ASSERT_FALSE(shared->is_compiled());
@@ -520,7 +543,7 @@ TEST_F(CompilerDispatcherTest, FinishNowWithBackgroundTask) {
 }
 
 TEST_F(CompilerDispatcherTest, IdleTaskMultipleJobs) {
-  MockPlatform platform;
+  MockPlatform platform(V8::GetCurrentPlatform()->GetTracingController());
   CompilerDispatcher dispatcher(i_isolate(), &platform, FLAG_stack_size);
 
   const char script1[] = TEST_SCRIPT();
@@ -549,7 +572,7 @@ TEST_F(CompilerDispatcherTest, IdleTaskMultipleJobs) {
 }
 
 TEST_F(CompilerDispatcherTest, FinishNowException) {
-  MockPlatform platform;
+  MockPlatform platform(V8::GetCurrentPlatform()->GetTracingController());
   CompilerDispatcher dispatcher(i_isolate(), &platform, 50);
 
   std::string func_name("f" STR(__LINE__));
@@ -577,7 +600,7 @@ TEST_F(CompilerDispatcherTest, FinishNowException) {
 }
 
 TEST_F(CompilerDispatcherTest, AsyncAbortAllPendingBackgroundTask) {
-  MockPlatform platform;
+  MockPlatform platform(V8::GetCurrentPlatform()->GetTracingController());
   CompilerDispatcher dispatcher(i_isolate(), &platform, FLAG_stack_size);
 
   const char script[] = TEST_SCRIPT();
@@ -590,15 +613,15 @@ TEST_F(CompilerDispatcherTest, AsyncAbortAllPendingBackgroundTask) {
   ASSERT_TRUE(platform.IdleTaskPending());
 
   ASSERT_EQ(dispatcher.jobs_.size(), 1u);
-  ASSERT_TRUE(dispatcher.jobs_.begin()->second->status() ==
-              CompileJobStatus::kInitial);
+  ASSERT_EQ(UnoptimizedCompileJob::Status::kInitial,
+            GetUnoptimizedJobStatus(dispatcher.jobs_.begin()->second));
 
   // Make compiling super expensive, and advance job as much as possible on the
   // foreground thread.
-  dispatcher.tracer_->RecordCompile(50000.0, 1);
+  dispatcher.tracer_->RecordCompile(50000.0);
   platform.RunIdleTask(10.0, 0.0);
-  ASSERT_TRUE(dispatcher.jobs_.begin()->second->status() ==
-              CompileJobStatus::kReadyToCompile);
+  ASSERT_EQ(UnoptimizedCompileJob::Status::kReadyToCompile,
+            GetUnoptimizedJobStatus(dispatcher.jobs_.begin()->second));
 
   ASSERT_TRUE(dispatcher.IsEnqueued(shared));
   ASSERT_FALSE(shared->is_compiled());
@@ -620,7 +643,7 @@ TEST_F(CompilerDispatcherTest, AsyncAbortAllPendingBackgroundTask) {
 }
 
 TEST_F(CompilerDispatcherTest, AsyncAbortAllRunningBackgroundTask) {
-  MockPlatform platform;
+  MockPlatform platform(V8::GetCurrentPlatform()->GetTracingController());
   CompilerDispatcher dispatcher(i_isolate(), &platform, FLAG_stack_size);
 
   const char script1[] = TEST_SCRIPT();
@@ -638,15 +661,15 @@ TEST_F(CompilerDispatcherTest, AsyncAbortAllRunningBackgroundTask) {
   ASSERT_TRUE(platform.IdleTaskPending());
 
   ASSERT_EQ(dispatcher.jobs_.size(), 1u);
-  ASSERT_TRUE(dispatcher.jobs_.begin()->second->status() ==
-              CompileJobStatus::kInitial);
+  ASSERT_EQ(UnoptimizedCompileJob::Status::kInitial,
+            GetUnoptimizedJobStatus(dispatcher.jobs_.begin()->second));
 
   // Make compiling super expensive, and advance job as much as possible on the
   // foreground thread.
-  dispatcher.tracer_->RecordCompile(50000.0, 1);
+  dispatcher.tracer_->RecordCompile(50000.0);
   platform.RunIdleTask(10.0, 0.0);
-  ASSERT_TRUE(dispatcher.jobs_.begin()->second->status() ==
-              CompileJobStatus::kReadyToCompile);
+  ASSERT_EQ(UnoptimizedCompileJob::Status::kReadyToCompile,
+            GetUnoptimizedJobStatus(dispatcher.jobs_.begin()->second));
 
   ASSERT_TRUE(dispatcher.IsEnqueued(shared1));
   ASSERT_FALSE(shared1->is_compiled());
@@ -702,7 +725,7 @@ TEST_F(CompilerDispatcherTest, AsyncAbortAllRunningBackgroundTask) {
 }
 
 TEST_F(CompilerDispatcherTest, FinishNowDuringAbortAll) {
-  MockPlatform platform;
+  MockPlatform platform(V8::GetCurrentPlatform()->GetTracingController());
   CompilerDispatcher dispatcher(i_isolate(), &platform, FLAG_stack_size);
 
   const char script[] = TEST_SCRIPT();
@@ -715,15 +738,15 @@ TEST_F(CompilerDispatcherTest, FinishNowDuringAbortAll) {
   ASSERT_TRUE(platform.IdleTaskPending());
 
   ASSERT_EQ(dispatcher.jobs_.size(), 1u);
-  ASSERT_TRUE(dispatcher.jobs_.begin()->second->status() ==
-              CompileJobStatus::kInitial);
+  ASSERT_EQ(UnoptimizedCompileJob::Status::kInitial,
+            GetUnoptimizedJobStatus(dispatcher.jobs_.begin()->second));
 
   // Make compiling super expensive, and advance job as much as possible on the
   // foreground thread.
-  dispatcher.tracer_->RecordCompile(50000.0, 1);
+  dispatcher.tracer_->RecordCompile(50000.0);
   platform.RunIdleTask(10.0, 0.0);
-  ASSERT_TRUE(dispatcher.jobs_.begin()->second->status() ==
-              CompileJobStatus::kReadyToCompile);
+  ASSERT_EQ(UnoptimizedCompileJob::Status::kReadyToCompile,
+            GetUnoptimizedJobStatus(dispatcher.jobs_.begin()->second));
 
   ASSERT_TRUE(dispatcher.IsEnqueued(shared));
   ASSERT_FALSE(shared->is_compiled());
@@ -781,7 +804,7 @@ TEST_F(CompilerDispatcherTest, FinishNowDuringAbortAll) {
 }
 
 TEST_F(CompilerDispatcherTest, MemoryPressure) {
-  MockPlatform platform;
+  MockPlatform platform(V8::GetCurrentPlatform()->GetTracingController());
   CompilerDispatcher dispatcher(i_isolate(), &platform, FLAG_stack_size);
 
   const char script[] = TEST_SCRIPT();
@@ -829,7 +852,7 @@ class PressureNotificationTask : public CancelableTask {
 }  // namespace
 
 TEST_F(CompilerDispatcherTest, MemoryPressureFromBackground) {
-  MockPlatform platform;
+  MockPlatform platform(V8::GetCurrentPlatform()->GetTracingController());
   CompilerDispatcher dispatcher(i_isolate(), &platform, FLAG_stack_size);
 
   const char script[] = TEST_SCRIPT();
@@ -862,14 +885,14 @@ TEST_F(CompilerDispatcherTest, MemoryPressureFromBackground) {
 }
 
 TEST_F(CompilerDispatcherTest, EnqueueJob) {
-  MockPlatform platform;
+  MockPlatform platform(V8::GetCurrentPlatform()->GetTracingController());
   CompilerDispatcher dispatcher(i_isolate(), &platform, FLAG_stack_size);
   const char script[] = TEST_SCRIPT();
   Handle<JSFunction> f =
       Handle<JSFunction>::cast(test::RunJS(isolate(), script));
   Handle<SharedFunctionInfo> shared(f->shared(), i_isolate());
   std::unique_ptr<CompilerDispatcherJob> job(
-      new CompilerDispatcherJob(i_isolate(), dispatcher.tracer_.get(), shared,
+      new UnoptimizedCompileJob(i_isolate(), dispatcher.tracer_.get(), shared,
                                 dispatcher.max_stack_size_));
   ASSERT_FALSE(dispatcher.IsEnqueued(shared));
   dispatcher.Enqueue(std::move(job));
@@ -881,22 +904,22 @@ TEST_F(CompilerDispatcherTest, EnqueueJob) {
 }
 
 TEST_F(CompilerDispatcherTest, EnqueueWithoutSFI) {
-  MockPlatform platform;
+  MockPlatform platform(V8::GetCurrentPlatform()->GetTracingController());
   CompilerDispatcher dispatcher(i_isolate(), &platform, FLAG_stack_size);
   ASSERT_TRUE(dispatcher.jobs_.empty());
-  ASSERT_TRUE(dispatcher.shared_to_job_id_.empty());
+  ASSERT_TRUE(dispatcher.shared_to_unoptimized_job_id_.empty());
   std::unique_ptr<test::FinishCallback> callback(new test::FinishCallback());
   std::unique_ptr<test::ScriptResource> resource(
       new test::ScriptResource(test_script, strlen(test_script)));
   ASSERT_TRUE(callback->result() == nullptr);
   ASSERT_TRUE(dispatcher.Enqueue(CreateSource(i_isolate(), resource.get()), 0,
                                  static_cast<int>(resource->length()), SLOPPY,
-                                 1, false, false, false, false, 0,
-                                 callback.get(), nullptr));
+                                 1, false, false, false, 0, callback.get(),
+                                 nullptr));
   ASSERT_TRUE(!dispatcher.jobs_.empty());
-  ASSERT_TRUE(dispatcher.jobs_.begin()->second->status() ==
-              CompileJobStatus::kReadyToParse);
-  ASSERT_TRUE(dispatcher.shared_to_job_id_.empty());
+  ASSERT_EQ(UnoptimizedCompileJob::Status::kReadyToParse,
+            GetUnoptimizedJobStatus(dispatcher.jobs_.begin()->second));
+  ASSERT_TRUE(dispatcher.shared_to_unoptimized_job_id_.empty());
   ASSERT_TRUE(callback->result() == nullptr);
 
   ASSERT_TRUE(platform.IdleTaskPending());
@@ -906,7 +929,7 @@ TEST_F(CompilerDispatcherTest, EnqueueWithoutSFI) {
 }
 
 TEST_F(CompilerDispatcherTest, EnqueueAndStep) {
-  MockPlatform platform;
+  MockPlatform platform(V8::GetCurrentPlatform()->GetTracingController());
   CompilerDispatcher dispatcher(i_isolate(), &platform, FLAG_stack_size);
 
   const char script[] = TEST_SCRIPT();
@@ -918,181 +941,13 @@ TEST_F(CompilerDispatcherTest, EnqueueAndStep) {
   ASSERT_TRUE(dispatcher.EnqueueAndStep(shared));
   ASSERT_TRUE(dispatcher.IsEnqueued(shared));
 
-  ASSERT_TRUE(dispatcher.jobs_.begin()->second->status() ==
-              CompileJobStatus::kReadyToParse);
+  ASSERT_EQ(UnoptimizedCompileJob::Status::kReadyToParse,
+            GetUnoptimizedJobStatus(dispatcher.jobs_.begin()->second));
 
   ASSERT_TRUE(platform.IdleTaskPending());
   platform.ClearIdleTask();
   ASSERT_TRUE(platform.BackgroundTasksPending());
   platform.ClearBackgroundTasks();
-}
-
-TEST_F(CompilerDispatcherTest, EnqueueParsed) {
-  MockPlatform platform;
-  CompilerDispatcher dispatcher(i_isolate(), &platform, FLAG_stack_size);
-
-  const char source[] = TEST_SCRIPT();
-  Handle<JSFunction> f =
-      Handle<JSFunction>::cast(test::RunJS(isolate(), source));
-  Handle<SharedFunctionInfo> shared(f->shared(), i_isolate());
-  Handle<Script> script(Script::cast(shared->script()), i_isolate());
-
-  ParseInfo parse_info(shared);
-  ASSERT_TRUE(Compiler::ParseAndAnalyze(&parse_info, i_isolate()));
-  std::shared_ptr<DeferredHandles> handles;
-
-  ASSERT_FALSE(dispatcher.IsEnqueued(shared));
-  ASSERT_TRUE(dispatcher.Enqueue(script, shared, parse_info.literal(),
-                                 parse_info.zone_shared(), handles, handles));
-  ASSERT_TRUE(dispatcher.IsEnqueued(shared));
-
-  ASSERT_TRUE(dispatcher.jobs_.begin()->second->status() ==
-              CompileJobStatus::kAnalyzed);
-
-  ASSERT_TRUE(platform.IdleTaskPending());
-  platform.ClearIdleTask();
-  ASSERT_FALSE(platform.BackgroundTasksPending());
-}
-
-TEST_F(CompilerDispatcherTest, EnqueueAndStepParsed) {
-  MockPlatform platform;
-  CompilerDispatcher dispatcher(i_isolate(), &platform, FLAG_stack_size);
-
-  const char source[] = TEST_SCRIPT();
-  Handle<JSFunction> f =
-      Handle<JSFunction>::cast(test::RunJS(isolate(), source));
-  Handle<SharedFunctionInfo> shared(f->shared(), i_isolate());
-  Handle<Script> script(Script::cast(shared->script()), i_isolate());
-
-  ParseInfo parse_info(shared);
-  ASSERT_TRUE(Compiler::ParseAndAnalyze(&parse_info, i_isolate()));
-  std::shared_ptr<DeferredHandles> handles;
-
-  ASSERT_FALSE(dispatcher.IsEnqueued(shared));
-  ASSERT_TRUE(dispatcher.EnqueueAndStep(script, shared, parse_info.literal(),
-                                        parse_info.zone_shared(), handles,
-                                        handles));
-  ASSERT_TRUE(dispatcher.IsEnqueued(shared));
-
-  ASSERT_TRUE(dispatcher.jobs_.begin()->second->status() ==
-              CompileJobStatus::kReadyToCompile);
-
-  ASSERT_TRUE(platform.IdleTaskPending());
-  ASSERT_TRUE(platform.BackgroundTasksPending());
-  platform.ClearIdleTask();
-  platform.ClearBackgroundTasks();
-}
-
-TEST_F(CompilerDispatcherTest, CompileParsedOutOfScope) {
-  MockPlatform platform;
-  CompilerDispatcher dispatcher(i_isolate(), &platform, FLAG_stack_size);
-
-  const char source[] = TEST_SCRIPT();
-  Handle<JSFunction> f =
-      Handle<JSFunction>::cast(test::RunJS(isolate(), source));
-  Handle<SharedFunctionInfo> shared(f->shared(), i_isolate());
-  Handle<Script> script(Script::cast(shared->script()), i_isolate());
-
-  {
-    HandleScope scope(i_isolate());  // Create handles scope for parsing.
-
-    ASSERT_FALSE(shared->is_compiled());
-    ParseInfo parse_info(shared);
-
-    ASSERT_TRUE(parsing::ParseAny(&parse_info, i_isolate()));
-    DeferredHandleScope handles_scope(i_isolate());
-    { ASSERT_TRUE(Compiler::Analyze(&parse_info, i_isolate())); }
-    std::shared_ptr<DeferredHandles> compilation_handles(
-        handles_scope.Detach());
-
-    ASSERT_FALSE(platform.IdleTaskPending());
-    ASSERT_TRUE(dispatcher.Enqueue(
-        script, shared, parse_info.literal(), parse_info.zone_shared(),
-        parse_info.deferred_handles(), compilation_handles));
-    ASSERT_TRUE(platform.IdleTaskPending());
-  }
-  // Exit the handles scope and destroy ParseInfo before running the idle task.
-
-  // Since time doesn't progress on the MockPlatform, this is enough idle time
-  // to finish compiling the function.
-  platform.RunIdleTask(1000.0, 0.0);
-
-  ASSERT_FALSE(dispatcher.IsEnqueued(shared));
-  ASSERT_TRUE(shared->is_compiled());
-}
-
-namespace {
-
-const char kExtensionSource[] = "native function Dummy();";
-
-class MockNativeFunctionExtension : public Extension {
- public:
-  MockNativeFunctionExtension()
-      : Extension("mock-extension", kExtensionSource), function_(&Dummy) {}
-
-  virtual v8::Local<v8::FunctionTemplate> GetNativeFunctionTemplate(
-      v8::Isolate* isolate, v8::Local<v8::String> name) {
-    return v8::FunctionTemplate::New(isolate, function_);
-  }
-
-  static void Dummy(const v8::FunctionCallbackInfo<v8::Value>& args) { return; }
-
- private:
-  v8::FunctionCallback function_;
-
-  DISALLOW_COPY_AND_ASSIGN(MockNativeFunctionExtension);
-};
-
-}  // namespace
-
-TEST_F(CompilerDispatcherTestWithoutContext, CompileExtensionWithoutContext) {
-  MockPlatform platform;
-  CompilerDispatcher dispatcher(i_isolate(), &platform, FLAG_stack_size);
-  Local<v8::Context> context = v8::Context::New(isolate());
-
-  MockNativeFunctionExtension extension;
-  Handle<String> script_str =
-      i_isolate()
-          ->factory()
-          ->NewStringFromUtf8(CStrVector(kExtensionSource))
-          .ToHandleChecked();
-  Handle<Script> script = i_isolate()->factory()->NewScript(script_str);
-  script->set_type(Script::TYPE_EXTENSION);
-
-  Handle<SharedFunctionInfo> shared;
-  {
-    v8::Context::Scope scope(context);
-
-    ParseInfo parse_info(script);
-    parse_info.set_extension(&extension);
-
-    ASSERT_TRUE(parsing::ParseAny(&parse_info, i_isolate()));
-    Handle<FixedArray> shared_infos_array(i_isolate()->factory()->NewFixedArray(
-        parse_info.max_function_literal_id() + 1));
-    parse_info.script()->set_shared_function_infos(*shared_infos_array);
-    DeferredHandleScope handles_scope(i_isolate());
-    { ASSERT_TRUE(Compiler::Analyze(&parse_info, i_isolate())); }
-    std::shared_ptr<DeferredHandles> compilation_handles(
-        handles_scope.Detach());
-
-    shared = i_isolate()->factory()->NewSharedFunctionInfoForLiteral(
-        parse_info.literal(), script);
-    parse_info.set_shared_info(shared);
-
-    ASSERT_FALSE(platform.IdleTaskPending());
-    ASSERT_TRUE(dispatcher.Enqueue(
-        script, shared, parse_info.literal(), parse_info.zone_shared(),
-        parse_info.deferred_handles(), compilation_handles));
-    ASSERT_TRUE(platform.IdleTaskPending());
-  }
-  // Exit the context scope before running the idle task.
-
-  // Since time doesn't progress on the MockPlatform, this is enough idle time
-  // to finish compiling the function.
-  platform.RunIdleTask(1000.0, 0.0);
-
-  ASSERT_FALSE(dispatcher.IsEnqueued(shared));
-  ASSERT_TRUE(shared->is_compiled());
 }
 
 TEST_F(CompilerDispatcherTest, CompileLazyFinishesDispatcherJob) {
@@ -1145,39 +1000,24 @@ TEST_F(CompilerDispatcherTest, CompileLazy2FinishesDispatcherJob) {
 }
 
 TEST_F(CompilerDispatcherTest, EnqueueAndStepTwice) {
-  MockPlatform platform;
+  MockPlatform platform(V8::GetCurrentPlatform()->GetTracingController());
   CompilerDispatcher dispatcher(i_isolate(), &platform, FLAG_stack_size);
 
-  const char source[] = TEST_SCRIPT();
+  const char script[] = TEST_SCRIPT();
   Handle<JSFunction> f =
-      Handle<JSFunction>::cast(test::RunJS(isolate(), source));
+      Handle<JSFunction>::cast(test::RunJS(isolate(), script));
   Handle<SharedFunctionInfo> shared(f->shared(), i_isolate());
-  Handle<Script> script(Script::cast(shared->script()), i_isolate());
-
-  ParseInfo parse_info(shared);
-  ASSERT_TRUE(Compiler::ParseAndAnalyze(&parse_info, i_isolate()));
-  std::shared_ptr<DeferredHandles> handles;
 
   ASSERT_FALSE(dispatcher.IsEnqueued(shared));
-  ASSERT_TRUE(dispatcher.EnqueueAndStep(script, shared, parse_info.literal(),
-                                        parse_info.zone_shared(), handles,
-                                        handles));
-  ASSERT_TRUE(dispatcher.IsEnqueued(shared));
-
-  ASSERT_TRUE(dispatcher.jobs_.begin()->second->status() ==
-              CompileJobStatus::kReadyToCompile);
-
-  // EnqueueAndStep of the same function again (either already parsed or for
-  // compile and parse) shouldn't step the job.
-  ASSERT_TRUE(dispatcher.EnqueueAndStep(script, shared, parse_info.literal(),
-                                        parse_info.zone_shared(), handles,
-                                        handles));
-  ASSERT_TRUE(dispatcher.IsEnqueued(shared));
-  ASSERT_TRUE(dispatcher.jobs_.begin()->second->status() ==
-              CompileJobStatus::kReadyToCompile);
   ASSERT_TRUE(dispatcher.EnqueueAndStep(shared));
-  ASSERT_TRUE(dispatcher.jobs_.begin()->second->status() ==
-              CompileJobStatus::kReadyToCompile);
+  ASSERT_TRUE(dispatcher.IsEnqueued(shared));
+  ASSERT_EQ(UnoptimizedCompileJob::Status::kReadyToParse,
+            GetUnoptimizedJobStatus(dispatcher.jobs_.begin()->second));
+
+  // EnqueueAndStep of the same function again (shouldn't step the job.
+  ASSERT_TRUE(dispatcher.EnqueueAndStep(shared));
+  ASSERT_EQ(UnoptimizedCompileJob::Status::kReadyToParse,
+            GetUnoptimizedJobStatus(dispatcher.jobs_.begin()->second));
 
   ASSERT_TRUE(platform.IdleTaskPending());
   ASSERT_TRUE(platform.BackgroundTasksPending());
@@ -1186,7 +1026,7 @@ TEST_F(CompilerDispatcherTest, EnqueueAndStepTwice) {
 }
 
 TEST_F(CompilerDispatcherTest, CompileMultipleOnBackgroundThread) {
-  MockPlatform platform;
+  MockPlatform platform(V8::GetCurrentPlatform()->GetTracingController());
   CompilerDispatcher dispatcher(i_isolate(), &platform, FLAG_stack_size);
 
   const char script1[] = TEST_SCRIPT();
@@ -1204,20 +1044,20 @@ TEST_F(CompilerDispatcherTest, CompileMultipleOnBackgroundThread) {
   ASSERT_TRUE(platform.IdleTaskPending());
 
   ASSERT_EQ(dispatcher.jobs_.size(), 2u);
-  ASSERT_TRUE(dispatcher.jobs_.begin()->second->status() ==
-              CompileJobStatus::kInitial);
-  ASSERT_TRUE((++dispatcher.jobs_.begin())->second->status() ==
-              CompileJobStatus::kInitial);
+  ASSERT_EQ(UnoptimizedCompileJob::Status::kInitial,
+            GetUnoptimizedJobStatus(dispatcher.jobs_.begin()->second));
+  ASSERT_EQ(UnoptimizedCompileJob::Status::kInitial,
+            GetUnoptimizedJobStatus((++dispatcher.jobs_.begin())->second));
 
   // Make compiling super expensive, and advance job as much as possible on the
   // foreground thread.
-  dispatcher.tracer_->RecordCompile(50000.0, 1);
+  dispatcher.tracer_->RecordCompile(50000.0);
   platform.RunIdleTask(10.0, 0.0);
   ASSERT_EQ(dispatcher.jobs_.size(), 2u);
-  ASSERT_TRUE(dispatcher.jobs_.begin()->second->status() ==
-              CompileJobStatus::kReadyToCompile);
-  ASSERT_TRUE((++dispatcher.jobs_.begin())->second->status() ==
-              CompileJobStatus::kReadyToCompile);
+  ASSERT_EQ(UnoptimizedCompileJob::Status::kReadyToCompile,
+            GetUnoptimizedJobStatus(dispatcher.jobs_.begin()->second));
+  ASSERT_EQ(UnoptimizedCompileJob::Status::kReadyToCompile,
+            GetUnoptimizedJobStatus((++dispatcher.jobs_.begin())->second));
 
   ASSERT_TRUE(dispatcher.IsEnqueued(shared1));
   ASSERT_TRUE(dispatcher.IsEnqueued(shared2));
@@ -1231,10 +1071,10 @@ TEST_F(CompilerDispatcherTest, CompileMultipleOnBackgroundThread) {
   ASSERT_TRUE(platform.IdleTaskPending());
   ASSERT_FALSE(platform.BackgroundTasksPending());
   ASSERT_EQ(dispatcher.jobs_.size(), 2u);
-  ASSERT_TRUE(dispatcher.jobs_.begin()->second->status() ==
-              CompileJobStatus::kCompiled);
-  ASSERT_TRUE((++dispatcher.jobs_.begin())->second->status() ==
-              CompileJobStatus::kCompiled);
+  ASSERT_EQ(UnoptimizedCompileJob::Status::kCompiled,
+            GetUnoptimizedJobStatus(dispatcher.jobs_.begin()->second));
+  ASSERT_EQ(UnoptimizedCompileJob::Status::kCompiled,
+            GetUnoptimizedJobStatus((++dispatcher.jobs_.begin())->second));
 
   // Now grant a lot of idle time and freeze time.
   platform.RunIdleTask(1000.0, 0.0);

@@ -66,6 +66,7 @@ let kDataSectionCode = 11;     // Data segments
 let kNameSectionCode = 12;     // Name section (encoded as string)
 
 // Name section types
+let kModuleNameCode = 0;
 let kFunctionNamesCode = 1;
 let kLocalNamesCode = 2;
 
@@ -86,7 +87,6 @@ let kWasmI32 = 0x7f;
 let kWasmI64 = 0x7e;
 let kWasmF32 = 0x7d;
 let kWasmF64 = 0x7c;
-let kWasmS128 = 0x7b;
 
 let kExternalFunction = 0;
 let kExternalTable = 1;
@@ -117,7 +117,6 @@ let kSig_v_l = makeSig([kWasmI64], []);
 let kSig_v_d = makeSig([kWasmF64], []);
 let kSig_v_dd = makeSig([kWasmF64, kWasmF64], []);
 let kSig_v_ddi = makeSig([kWasmF64, kWasmF64, kWasmI32], []);
-let kSig_s_v = makeSig([], [kWasmS128]);
 
 function makeSig(params, results) {
   return {params: params, results: results};
@@ -319,7 +318,6 @@ let kExprI32ReinterpretF32 = 0xbc;
 let kExprI64ReinterpretF64 = 0xbd;
 let kExprF32ReinterpretI32 = 0xbe;
 let kExprF64ReinterpretI64 = 0xbf;
-let kExprS128LoadMem = 0xc0;
 
 let kTrapUnreachable          = 0;
 let kTrapMemOutOfBounds       = 1;

@@ -4,11 +4,11 @@
 
 #include "src/assembler-inl.h"
 #include "src/trap-handler/trap-handler.h"
-#include "src/wasm/wasm-macro-gen.h"
 #include "test/cctest/cctest.h"
 #include "test/cctest/compiler/value-helper.h"
 #include "test/cctest/wasm/wasm-run-utils.h"
 #include "test/common/wasm/test-signatures.h"
+#include "test/common/wasm/wasm-macro-gen.h"
 
 using namespace v8::base;
 using namespace v8::internal;
@@ -64,10 +64,9 @@ void CheckExceptionInfos(Handle<Object> exc,
 
 // Trigger a trap for executing unreachable.
 TEST(Unreachable) {
-  WasmRunner<void> r(kExecuteCompiled);
+  // Create a WasmRunner with stack checks and traps enabled.
+  WasmRunner<void> r(kExecuteCompiled, "main", true);
   TestSignatures sigs;
-  // Set the execution context, such that a runtime error can be thrown.
-  r.SetModuleContext();
 
   BUILD(r, WASM_UNREACHABLE);
   uint32_t wasm_index = r.function()->func_index;
@@ -99,10 +98,9 @@ TEST(Unreachable) {
 
 // Trigger a trap for loading from out-of-bounds.
 TEST(IllegalLoad) {
-  WasmRunner<void> r(kExecuteCompiled);
+  WasmRunner<void> r(kExecuteCompiled, "main", true);
   TestSignatures sigs;
-  // Set the execution context, such that a runtime error can be thrown.
-  r.SetModuleContext();
+
   r.module().AddMemory(0L);
 
   BUILD(r, WASM_IF(WASM_ONE, WASM_SEQ(WASM_LOAD_MEM(MachineType::Int32(),
